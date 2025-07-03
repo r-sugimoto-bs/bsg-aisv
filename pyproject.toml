@@ -1,8 +1,0 @@
-[tool.poetry]
-name = "lixil-aisv-dev"
-version = "0.1.0"
-description = ""
-authors = ["Your Name <your.email@example.com>"]
-packages = [
-    { include = "app", from = "cloud_run" }
-]

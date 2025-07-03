@@ -43,197 +43,21 @@ class State(BaseModel):
         default=0, description="品質チェックのリトライ回数"
     )
 
-# class LangGraph:
-#     def __init__(self):
-#         self.model = ChatVertexAI(model_name="gemini-2.0-flash-001", project=os.environ.get('GOOGLE_CLOUD_PROJECT'), location="us-central1")
-#         self.llm = self.model.configurable_fields(max_output_tokens=ConfigurableField(id='max_output_tokens'))
-#         self.ROLES = {
-#             "1": {
-#                 "name": "スーパーバイザー",
-#                 "description": "ユーザーの要望に対して、最適な回答を提供するための全体的な監督と調整を行う役割です。",
-#                 "details": """LIXILの社員からの質問に対し、スーパーバイザーの目線から回答を行ってください。回答は、LIXILのデータソースのみを使用し生成してください。"""
-#             }
-#         }   # 回答を生成するAIの役割を記載する
-
-#     def goal_node(self, state: State) -> dict[str, Any]:
-#         query = state.query
-
-#         prompt = ChatPromptTemplate.from_messages(
-#             [
-#                 SystemMessage(
-#                     content="""
-#                     ユーザーの質問とユーザーの会話履歴を組み合わせて分析し、明確なユーザーのニーズを生成してください。
-#                     ニーズは、質問と会話履歴の内容に基づいて具体的である必要があります。
-#                     要件：
-#                     1. ニーズは明確である必要があります。
-#                     2. 以下の手順に従い回答の生成を行ってください。
-#                         - 会話履歴と質問を組み合わせて分析する。
-#                         - ユーザーのニーズを生成する。
-
-#                     4. 決して2.以外の行動を取ってはいけません。
-
-#                     """.strip()
-#                 ),
-#                 HumanMessagePromptTemplate.from_template("{query}"),
-#             ]
-#         )
-
-#         chain = prompt | self.llm.with_structured_output(PassiveGoal)
-#         result: PassiveGoal = chain.invoke({"query": query})
-#         return {
-#             "passive_goal": result.user_needs,
-#         }
-
-#     def selection_node(self, state: State) -> dict[str, Any]:
-#         query = state.passive_goal
-#         role_options = "\n".join([f"{k}. {v['name']}: {v['description']}" for k, v in self.ROLES.items()])
-
-#         prompt = ChatPromptTemplate.from_template(
-#             """要望を分析し、最も適切な回答担当ロールを選択してください。
-
-#             選択肢:
-#             {role_options}
-
-#             回答は選択肢の番号（1）のみを返してください。
-
-#             要望: {query}
-#             """.strip()
-#         )
-
-#         chain = prompt | self.llm.with_config(configurable=dict(max_tokens=1)) | StrOutputParser()
-#         role_number = chain.invoke({"role_options": role_options, "query": query}).strip()
-
-#         selected_role = self.ROLES.get(role_number, self.ROLES["1"])["name"]
-
-#         return {
-#             "current_role": selected_role
-#         }
-
-#     def answering_node(self, state: State) -> dict[str, Any]:
-#         query = state.query
-#         role = state.current_role
-#         role_details = "\n".join([f"- {v['name']}: {v['details']}" for v in self.ROLES.values()])
-
-#         system_prompt = """
-#         あなたは{role}として回答してください。あなたの役割に基づいてユーザーのニーズを満たす回答を提供してください。
-#         役割の詳細に従って回答を生成してください。
-#         役割の詳細:
-#         {role_details}
-#         ユーザーが求めているニーズは以下の通りです。
-#         {needs}
-#         """
-#         system_prompt = system_prompt.format(
-#             role=role,
-#             role_details=role_details,  # 修正: role_detailsをformatに追加
-#             needs=state.passive_goal,
-#         )
-
-#         prompt = ChatPromptTemplate.from_messages(
-#             [
-#                 SystemMessage(
-#                     content=system_prompt.strip()),
-#                 HumanMessagePromptTemplate.from_template("{query}"),
-#             ]
-#         )
-
-#         chain = prompt | self.llm | StrOutputParser()
-#         answer = chain.invoke({"query": query})
-
-#         return {
-#             "messages": [answer]
-#         }
-
-#     def check_node(self, state: State) -> dict[str, Any]:
-#         query = state.query
-#         answer = state.messages[-1] if state.messages else ""
-
-#         prompt = ChatPromptTemplate.from_template(
-#             """以下の回答の品質をチェック'False'または'True'を回答してください。
-#             品質をチェック項目を全て満たしている場合のみ'True'を回答することができます。
-#                 1. 回答の日本語に問題がない
-#                 2. 回答が空文字でない
-#                 3. ハルシネーションが'False'である
-#             また、その判断理由も説明してください。
-
-#             ユーザーからの質問: {query}
-#             回答: {answer}
-#             ハルシネーション: {is_hallucination}
-#             """.strip()
-#         )
-
-#         chain = prompt | self.llm.with_structured_output(Judgement)
-
-#         result: Judgement = chain.invoke({"query": query, "answer": answer, "is_hallucination": state.is_hallucination})
-#         if result is None:
-#             raise ValueError("LLM の応答が無効です")
-
-#         return {
-#             "current_judge": result.judge,
-#             "judgement_reason": result.reason,
-#             "retry_count": state.retry_count + 1
-#         }
-
-#     def langgraph(self):
-#         workflow = StateGraph(State)
-
-#         # ノードを追加
-#         workflow.add_node("goal_create", self.goal_node)
-#         # workflow.add_node("selection", self.selection_node)
-#         # workflow.add_node("answering", self.answering_node)
-#         workflow.add_node("check", self.check_node)
-
-#         # # フローを設定
-#         workflow.set_entry_point("goal_create")
-#         # workflow.add_edge("goal_create", "selection")
-#         # workflow.add_edge("selection", "answering")
-#         workflow.add_edge("goal_create", "check")
-#         #workflow.add_edge("answering", "check")
-
-#         # checkノードの条件分岐の場合コーディネート提案担当
-#         # workflow.add_conditional_edges(
-#         #     "check",
-#         #     lambda state: state.current_judge or state.retry_count >= 3,
-#         #     {True: END, False: "selection"}
-#         # )
-#         workflow.add_edge("check",END)
-
-#         checkpointer = MemorySaver()
-
-#         # グラフをコンパイル
-#         compiled = workflow.compile(checkpointer=checkpointer)
-
-#         return compiled
-
-
-model = ChatVertexAI(model_name="gemini-2.0-flash-001", project=os.environ.get('GOOGLE_CLOUD_PROJECT'), location="us-central1")
-llm = model.configurable_fields(max_output_tokens=ConfigurableField(id='max_output_tokens'))
-ROLES = {
+class LangGraph:
+    def __init__(self):
+        self.model = ChatVertexAI(model_name="gemini-2.0-flash-001", project=os.environ.get('GOOGLE_CLOUD_PROJECT'), location="us-central1")
+        self.llm = self.model.configurable_fields(max_output_tokens=ConfigurableField(id='max_output_tokens'))
+        self.ROLES = {
             "1": {
                 "name": "スーパーバイザー",
                 "description": "ユーザーの要望に対して、最適な回答を提供するための全体的な監督と調整を行う役割です。",
                 "details": """LIXILの社員からの質問に対し、スーパーバイザーの目線から回答を行ってください。回答は、LIXILのデータソースのみを使用し生成してください。"""
             }
-        }
+        }   # 回答を生成するAIの役割を記載する
 
-def goal_node(state: State) -> State:
-    query = state.query
+    def goal_node(self, state: State) -> dict[str, Any]:
+        query = state.query
 
-    # prompt = ChatPromptTemplate.from_template(
-    # """ユーザーの質問とユーザーの会話履歴を組み合わせて分析し、明確なユーザーのニーズを生成してください。
-    # ニーズは、質問と会話履歴の内容に基づいて具体的である必要があります。
-    # 要件：
-    # 1. ニーズは明確である必要があります。
-    # 2. 以下の手順に従い回答の生成を行ってください。
-    # - 会話履歴と質問を組み合わせて分析する。
-    # - ユーザーのニーズを生成する。
-
-    # 4. 決して2.以外の行動を取ってはいけません。
-    
-    # ユーザーからの質問: {query}
-    # """.strip()
-    # )
-    # print(f"query: {query}")
-    try:
         prompt = ChatPromptTemplate.from_messages(
             [
                 SystemMessage(
@@ -254,121 +78,125 @@ def goal_node(state: State) -> State:
             ]
         )
 
-        chain = prompt | llm.with_structured_output(PassiveGoal)
+        chain = prompt | self.llm.with_structured_output(PassiveGoal)
         result: PassiveGoal = chain.invoke({"query": query})
-        state.passive_goal = result.user_needs
-        return state
-    except Exception as e:
-        print("goal_node error:", e)
-        raise
+        return {
+            "passive_goal": result.user_needs,
+        }
 
-def selection_node(state: State) -> State:
-    query = state.passive_goal
-    role_options = "\n".join([f"{k}. {v['name']}: {v['description']}" for k, v in ROLES.items()])
+    def selection_node(self, state: State) -> dict[str, Any]:
+        query = state.passive_goal
+        role_options = "\n".join([f"{k}. {v['name']}: {v['description']}" for k, v in self.ROLES.items()])
 
-    prompt = ChatPromptTemplate.from_template(
-        """要望を分析し、最も適切な回答担当ロールを選択してください。
+        prompt = ChatPromptTemplate.from_template(
+            """要望を分析し、最も適切な回答担当ロールを選択してください。
 
-        選択肢:
-        {role_options}
+            選択肢:
+            {role_options}
 
-        回答は選択肢の番号（1）のみを返してください。
+            回答は選択肢の番号（1）のみを返してください。
 
-        要望: {query}
-        """.strip()
-    )
+            要望: {query}
+            """.strip()
+        )
 
-    chain = prompt | llm.with_config(configurable=dict(max_tokens=1)) | StrOutputParser()
-    role_number = chain.invoke({"role_options": role_options, "query": query}).strip()
+        chain = prompt | self.llm.with_config(configurable=dict(max_tokens=1)) | StrOutputParser()
+        role_number = chain.invoke({"role_options": role_options, "query": query}).strip()
 
-    selected_role = ROLES.get(role_number, ROLES["1"])["name"]
-    state.current_role = selected_role
-    return state
+        selected_role = self.ROLES.get(role_number, self.ROLES["1"])["name"]
 
-def answering_node(state: State) -> State:
-    query = state.query
-    role = state.current_role
-    role_details = "\n".join([f"- {v['name']}: {v['details']}" for v in ROLES.values()])
+        return {
+            "current_role": selected_role
+        }
 
-    system_prompt = """
-    あなたは{role}として回答してください。あなたの役割に基づいてユーザーのニーズを満たす回答を提供してください。
-    役割の詳細に従って回答を生成してください。
-    役割の詳細:
-    {role_details}
-    ユーザーが求めているニーズは以下の通りです。
-    {needs}
-    """
-    system_prompt = system_prompt.format(
-        role=role,
-        role_details=role_details,  # 修正: role_detailsをformatに追加
-        needs=state.passive_goal,
-    )
+    def answering_node(self, state: State) -> dict[str, Any]:
+        query = state.query
+        role = state.current_role
+        role_details = "\n".join([f"- {v['name']}: {v['details']}" for v in self.ROLES.values()])
 
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            SystemMessage(
-                content=system_prompt.strip()),
-            HumanMessagePromptTemplate.from_template("{query}"),
-        ]
-    )
+        system_prompt = """
+        あなたは{role}として回答してください。あなたの役割に基づいてユーザーのニーズを満たす回答を提供してください。
+        役割の詳細に従って回答を生成してください。
+        役割の詳細:
+        {role_details}
+        ユーザーが求めているニーズは以下の通りです。
+        {needs}
+        """
+        system_prompt = system_prompt.format(
+            role=role,
+            role_details=role_details,  # 修正: role_detailsをformatに追加
+            needs=state.passive_goal,
+        )
 
-    chain = prompt | llm | StrOutputParser()
-    answer = chain.invoke({"query": query})
-    state.messages.append(answer)
-    return state
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                SystemMessage(
+                    content=system_prompt.strip()),
+                HumanMessagePromptTemplate.from_template("{query}"),
+            ]
+        )
 
-    return state
+        chain = prompt | self.llm | StrOutputParser()
+        answer = chain.invoke({"query": query})
 
-def check_node(state: State) -> State:
-    query = state.query
-    answer = state.messages[-1] if state.messages else ""
+        return {
+            "messages": [answer]
+        }
 
-    prompt = ChatPromptTemplate.from_template(
-        """以下の回答の品質をチェック'False'または'True'を回答してください。
-        品質をチェック項目を全て満たしている場合のみ'True'を回答することができます。
-            1. 回答の日本語に問題がない
-            2. 回答が空文字でない
-            3. ハルシネーションが'False'である
-        また、その判断理由も説明してください。
+    def check_node(self, state: State) -> dict[str, Any]:
+        query = state.query
+        answer = state.messages[-1] if state.messages else ""
 
-        ユーザーからの質問: {query}
-        回答: {answer}
-        ハルシネーション: {is_hallucination}
-        """.strip()
-    )
+        prompt = ChatPromptTemplate.from_template(
+            """以下の回答の品質をチェック'False'または'True'を回答してください。
+            品質をチェック項目を全て満たしている場合のみ'True'を回答することができます。
+                1. 回答の日本語に問題がない
+                2. 回答が空文字でない
+                3. ハルシネーションが'False'である
+            また、その判断理由も説明してください。
 
-    chain = prompt | llm.with_structured_output(Judgement)
+            ユーザーからの質問: {query}
+            回答: {answer}
+            ハルシネーション: {is_hallucination}
+            """.strip()
+        )
 
-    result: Judgement = chain.invoke({"query": query, "answer": answer, "is_hallucination": state.is_hallucination})
-    if result is None:
-        raise ValueError("LLM の応答が無効です")
+        chain = prompt | self.llm.with_structured_output(Judgement)
 
-    state.current_judge = result.judge
-    state.judgement_reason = result.reason
-    state.retry_count = getattr(state, "retry_count", 0) + 1
-    return state
+        result: Judgement = chain.invoke({"query": query, "answer": answer, "is_hallucination": state.is_hallucination})
+        if result is None:
+            raise ValueError("LLM の応答が無効です")
 
-def langgraph():
+        return {
+            "current_judge": result.judge,
+            "judgement_reason": result.reason,
+            "retry_count": state.retry_count + 1
+        }
+
+    def langgraph(self):
         workflow = StateGraph(State)
 
         # ノードを追加
-        workflow.add_node("goal_create", goal_node)
-        workflow.add_node("selection", selection_node)
-        workflow.add_node("answering", answering_node)
-        workflow.add_node("check", check_node)
+        workflow.add_node("goal_create", self.goal_node)
+        workflow.add_node("selection", self.selection_node)
+        workflow.add_node("answering", self.answering_node)
+        workflow.add_node("check", self.check_node)
 
         # # フローを設定
         workflow.set_entry_point("goal_create")
         workflow.add_edge("goal_create", "selection")
         workflow.add_edge("selection", "answering")
+        #workflow.add_edge("goal_create", "check")
         workflow.add_edge("answering", "check")
 
-        #checkノードの条件分岐の場合コーディネート提案担当
+        # checkノードの条件分岐
         workflow.add_conditional_edges(
             "check",
             lambda state: state.current_judge or state.retry_count >= 3,
             {True: END, False: "selection"}
         )
+        #workflow.add_edge("check",END)
+
         checkpointer = MemorySaver()
 
         # グラフをコンパイル
@@ -376,11 +204,183 @@ def langgraph():
 
         return compiled
 
-def main():
-    config = {"configurable": {"thread_id": "example-1"}}
-    user_query = State(query="こんにちは", chat_id="12345")
-    result = langgraph().invoke({"query": "こんにちは", "chat_id": "12345"}, config, debug=True)
-    print(result.messages[-1])
+
+# model = ChatVertexAI(model_name="gemini-2.0-flash-001", project=os.environ.get('GOOGLE_CLOUD_PROJECT'), location="us-central1")
+# llm = model.configurable_fields(max_output_tokens=ConfigurableField(id='max_output_tokens'))
+# ROLES = {
+#             "1": {
+#                 "name": "スーパーバイザー",
+#                 "description": "ユーザーの要望に対して、最適な回答を提供するための全体的な監督と調整を行う役割です。",
+#                 "details": """LIXILの社員からの質問に対し、スーパーバイザーの目線から回答を行ってください。回答は、LIXILのデータソースのみを使用し生成してください。"""
+#             }
+#         }
+
+# def goal_node(state: State) -> State:
+#     query = state.query
+
+#     # prompt = ChatPromptTemplate.from_template(
+#     # """ユーザーの質問とユーザーの会話履歴を組み合わせて分析し、明確なユーザーのニーズを生成してください。
+#     # ニーズは、質問と会話履歴の内容に基づいて具体的である必要があります。
+#     # 要件：
+#     # 1. ニーズは明確である必要があります。
+#     # 2. 以下の手順に従い回答の生成を行ってください。
+#     # - 会話履歴と質問を組み合わせて分析する。
+#     # - ユーザーのニーズを生成する。
+
+#     # 4. 決して2.以外の行動を取ってはいけません。
+    
+#     # ユーザーからの質問: {query}
+#     # """.strip()
+#     # )
+#     # print(f"query: {query}")
+#     try:
+#         prompt = ChatPromptTemplate.from_messages(
+#             [
+#                 SystemMessage(
+#                     content="""
+#                     ユーザーの質問とユーザーの会話履歴を組み合わせて分析し、明確なユーザーのニーズを生成してください。
+#                     ニーズは、質問と会話履歴の内容に基づいて具体的である必要があります。
+#                     要件：
+#                     1. ニーズは明確である必要があります。
+#                     2. 以下の手順に従い回答の生成を行ってください。
+#                         - 会話履歴と質問を組み合わせて分析する。
+#                         - ユーザーのニーズを生成する。
+
+#                     4. 決して2.以外の行動を取ってはいけません。
+
+#                     """.strip()
+#                 ),
+#                 HumanMessagePromptTemplate.from_template("{query}"),
+#             ]
+#         )
+
+#         chain = prompt | llm.with_structured_output(PassiveGoal)
+#         result: PassiveGoal = chain.invoke({"query": query})
+#         state.passive_goal = result.user_needs
+#         return state
+#     except Exception as e:
+#         print("goal_node error:", e)
+#         raise
+
+# def selection_node(state: State) -> State:
+#     query = state.passive_goal
+#     role_options = "\n".join([f"{k}. {v['name']}: {v['description']}" for k, v in ROLES.items()])
+
+#     prompt = ChatPromptTemplate.from_template(
+#         """要望を分析し、最も適切な回答担当ロールを選択してください。
+
+#         選択肢:
+#         {role_options}
+
+#         回答は選択肢の番号（1）のみを返してください。
+
+#         要望: {query}
+#         """.strip()
+#     )
+
+#     chain = prompt | llm.with_config(configurable=dict(max_tokens=1)) | StrOutputParser()
+#     role_number = chain.invoke({"role_options": role_options, "query": query}).strip()
+
+#     selected_role = ROLES.get(role_number, ROLES["1"])["name"]
+#     state.current_role = selected_role
+#     return state
+
+# def answering_node(state: State) -> State:
+#     query = state.query
+#     role = state.current_role
+#     role_details = "\n".join([f"- {v['name']}: {v['details']}" for v in ROLES.values()])
+
+#     system_prompt = """
+#     あなたは{role}として回答してください。あなたの役割に基づいてユーザーのニーズを満たす回答を提供してください。
+#     役割の詳細に従って回答を生成してください。
+#     役割の詳細:
+#     {role_details}
+#     ユーザーが求めているニーズは以下の通りです。
+#     {needs}
+#     """
+#     system_prompt = system_prompt.format(
+#         role=role,
+#         role_details=role_details,  # 修正: role_detailsをformatに追加
+#         needs=state.passive_goal,
+#     )
+
+#     prompt = ChatPromptTemplate.from_messages(
+#         [
+#             SystemMessage(
+#                 content=system_prompt.strip()),
+#             HumanMessagePromptTemplate.from_template("{query}"),
+#         ]
+#     )
+
+#     chain = prompt | llm | StrOutputParser()
+#     answer = chain.invoke({"query": query})
+#     state.messages.append(answer)
+#     return state
+
+#     return state
+
+# def check_node(state: State) -> State:
+#     query = state.query
+#     answer = state.messages[-1] if state.messages else ""
+
+#     prompt = ChatPromptTemplate.from_template(
+#         """以下の回答の品質をチェック'False'または'True'を回答してください。
+#         品質をチェック項目を全て満たしている場合のみ'True'を回答することができます。
+#             1. 回答の日本語に問題がない
+#             2. 回答が空文字でない
+#             3. ハルシネーションが'False'である
+#         また、その判断理由も説明してください。
+
+#         ユーザーからの質問: {query}
+#         回答: {answer}
+#         ハルシネーション: {is_hallucination}
+#         """.strip()
+#     )
+
+#     chain = prompt | llm.with_structured_output(Judgement)
+
+#     result: Judgement = chain.invoke({"query": query, "answer": answer, "is_hallucination": state.is_hallucination})
+#     if result is None:
+#         raise ValueError("LLM の応答が無効です")
+
+#     state.current_judge = result.judge
+#     state.judgement_reason = result.reason
+#     state.retry_count = getattr(state, "retry_count", 0) + 1
+#     return state
+
+# def langgraph():
+#         workflow = StateGraph(State)
+
+#         # ノードを追加
+#         workflow.add_node("goal_create", goal_node)
+#         workflow.add_node("selection", selection_node)
+#         workflow.add_node("answering", answering_node)
+#         workflow.add_node("check", check_node)
+
+#         # # フローを設定
+#         workflow.set_entry_point("goal_create")
+#         workflow.add_edge("goal_create", "selection")
+#         workflow.add_edge("selection", "answering")
+#         workflow.add_edge("answering", "check")
+
+#         #checkノードの条件分岐の場合コーディネート提案担当
+#         workflow.add_conditional_edges(
+#             "check",
+#             lambda state: state.current_judge or state.retry_count >= 3,
+#             {True: END, False: "selection"}
+#         )
+#         checkpointer = MemorySaver()
+
+#         # グラフをコンパイル
+#         compiled = workflow.compile(checkpointer=checkpointer)
+
+#         return compiled
+
+# def main():
+#     config = {"configurable": {"thread_id": "example-1"}}
+#     user_query = State(query="こんにちは", chat_id="12345")
+#     result = langgraph().invoke({"query": "こんにちは", "chat_id": "12345"}, config, debug=True)
+#     print(result.messages[-1])
 
 
 if __name__ == "__main__":

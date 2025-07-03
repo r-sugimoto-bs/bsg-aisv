@@ -1,21 +1,19 @@
 fastapi==0.112.2
 uvicorn==0.30.6
-pydantic==2.8.2
+pydantic==2.11.7
 python-dotenv==1.0.1
-pandas==2.2.3
 
 # Google Cloud関連
-google-cloud-bigquery==3.25.0
+google-cloud-bigquery==3.31.0
 google-cloud-storage==2.18.2
-google-cloud-aiplatform==1.68.0
-google-cloud-discoveryengine==0.12.2
+google-cloud-aiplatform==1.99.0
+google-cloud-discoveryengine==0.12.3
 google-cloud-vision==3.8.0
-google==3.0.0
-genai==2.1.0
+google-genai==1.10.0
+google-generativeai==0.8.0
 
 # LangChain/LLM関連
-langchain-core==0.1.47
-langchain-google-vertexai==1.0.2
-langgraph==0.0.38
-langchain==0.1.16
-langchain-text-splitters==0.0.1
+langchain==0.3.26
+langchain-core==0.3.67
+langchain-google-vertexai==2.0.26
+langgraph==0.3.21

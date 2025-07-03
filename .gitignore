@@ -2,3 +2,5 @@ __pycache__/
 venv/
 .env
 cloud_run/app/tests/
+*.egg-info/
+cloud_run/*.egg-info/

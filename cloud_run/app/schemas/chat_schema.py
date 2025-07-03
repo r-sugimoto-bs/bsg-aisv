@@ -22,6 +22,10 @@ class ChatResponse(BaseModel):
         ...,
         description="AIからの応答メッセージ。",
     )
+    grounding_data: Optional[List[dict]] = Field(
+        ...,
+        description="AIが回答生成に利用した情報ソース",
+    )
 
 
 class State(BaseModel):
@@ -37,6 +41,9 @@ class State(BaseModel):
     )
     messages: List[str] = Field(
         default_factory=list, description="回答履歴"
+    )
+    grounding_data: List[dict] = Field(
+        default_factory=list, description="グラウンディングデータ"
     )
     current_judge: bool = Field(
         default=False, description="品質チェックの結果"
