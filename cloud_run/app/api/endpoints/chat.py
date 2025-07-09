@@ -12,9 +12,10 @@ async def chat_bot_lg(req: ChatRequest):
     try:
 
         first_response = LangGraph().langgraph().invoke({"query": req.message, "chat_id": req.session_id}, config, debug=True)
+        print()
         return ChatResponse(
         message=first_response.get("messages")[-1],
-        grounding_data=None
+        grounding_data=first_response.get("grounding_data")
         )
     except Exception as e:
         print("langgraph:", e)
