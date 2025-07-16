@@ -263,7 +263,7 @@ class Geminijob:
         self.gemini = GeminiService()
         self.state  = state
         self.tools = [
-            types.Tool(retrieval=types.Retrieval(vertex_ai_search=types.VertexAISearch(datastore=f"projects/{os.getenv("GOOGLE_CLOUD_PROJECT")}/locations/global/collections/default_collection/dataStores/{os.getenv("DATASTORE")}"))),
+            types.Tool(retrieval=types.Retrieval(vertex_ai_search=types.VertexAISearch(datastore=f'projects/{os.getenv("GOOGLE_CLOUD_PROJECT")}/locations/global/collections/default_collection/dataStores/{os.getenv("DATASTORE")}'))),
         ]
 
     def flow(self) -> State:
