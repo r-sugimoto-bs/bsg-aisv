@@ -15,11 +15,8 @@ raw = os.getenv("CORS_ORIGINS", "")
 origins = [o.strip() for o in raw.split(",") if o.strip()]
 print("CORS orig:", origins)
 
-# ─────────────────────────────────────
-# ① 認証ミドルウェアを「内側」に登録
 app.add_middleware(AuthMiddleware)
 
-# ② CORSミドルウェアを「外側」に登録 ←必ず後！
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
