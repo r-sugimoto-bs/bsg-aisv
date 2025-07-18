@@ -1,4 +1,5 @@
 import os
+import re
 from langchain_core.runnables import ConfigurableField
 from langchain_google_vertexai import ChatVertexAI
 import operator
@@ -19,6 +20,7 @@ from langchain.tools.retriever import create_retriever_tool
 from langchain_core.runnables import RunnablePassthrough
 from google.genai import types
 from app.schemas.chat_schema import PassiveGoal, Judgement, State
+from app.modules.firestore import FireStore
 
 
 class LangGraph:
@@ -35,7 +37,7 @@ class LangGraph:
         self.retriever = VertexAISearchRetriever(
             project_id=os.environ["GOOGLE_CLOUD_PROJECT"],
             location_id="global",
-            data_store_id=os.environ["DATASTORE"],
+            data_store_id=os.getenv("FC_DATASTORE"),
             engine_data_type=0,
             max_documents=5,
         )
@@ -60,12 +62,12 @@ class LangGraph:
 
                     """.strip()
                 ),
+                MessagesPlaceholder("history"),
                 HumanMessagePromptTemplate.from_template("{query}"),
             ]
         )
-
         chain = prompt | self.llm.with_structured_output(PassiveGoal)
-        result: PassiveGoal = chain.invoke({"query": query})
+        result: PassiveGoal = chain.invoke({"history": state.history, "query": query})
         return {
             "passive_goal": result.user_needs,
         }
@@ -99,42 +101,68 @@ class LangGraph:
         query = state.query
         role = state.current_role
         role_details = "\n".join([f"- {v['name']}: {v['details']}" for v in self.ROLES.values()])
+        # 事前にRetrieverで検索
+        docs = self.retriever.get_relevant_documents(state.passive_goal)
+
+        fake_id_map = {}
+        context_parts = []
+        #Geminiの回答生成で使用する出典のインデックスと引用内容の作成
+        for i, doc in enumerate(docs, 1):
+            fake_id = f"src_{i}"
+            context_parts.append(f"[{fake_id}] {doc.page_content}")
+            # 出典のインデックスと引用内容をマッピング
+            fake_id_map[fake_id] = doc.metadata["source"]
+
+            context = "\n\n".join(context_parts)
 
         system_prompt = """
         あなたは{role}として回答してください。あなたの役割に基づいてユーザーのニーズを満たす回答を提供してください。
         提供されたcontextのみを使用して、この質問に答えてください。
+        回答には、使った情報の出典を [src_n] の形式で必ず明記してください（例: [src_1], [src_2]）。
+        [src_num1, src_num2] のような記載は避けてください。（例：[src_3, src_4]ではなく[src_3][src_4]としてください)
+        出典の一覧は書かないでください。
         役割の詳細に従って回答を生成してください。
         役割の詳細:
         {role_details}
         ユーザーが求めているニーズは以下の通りです。
         {needs}
+        context:
+        {context}
+
         """
         system_prompt = system_prompt.format(
             role=role,
             role_details=role_details,  # 修正: role_detailsをformatに追加
-            needs=state.passive_goal,
+            needs=state.passive_goal if state.passive_goal else "",
+            context=context if context else ""
         )
-
-        # 事前にRetrieverで検索
-        docs = self.retriever.get_relevant_documents(state.passive_goal)
-        context = "\n".join([doc.page_content for doc in docs])
-        # ドキュメントの内容やメタデータをgrounding_dataとして返す
-        grounding_data = [{"uri": doc.metadata.get("source")} for doc in docs]
-
         prompt = ChatPromptTemplate.from_messages(
             [
                 SystemMessage(
                     content=system_prompt.strip()),
-                HumanMessagePromptTemplate.from_template("質問：{question}, Context:{context}"),
+                MessagesPlaceholder("history"),
+                HumanMessagePromptTemplate.from_template("{question}"),
             ]
         )
 
         chain = prompt | self.llm | StrOutputParser()
-        answer = chain.invoke({"question": query, "context": context})
+        answer = chain.invoke({"history": state.history, "question": query})
+        # 出典情報を[n]のような形で表示する
+        used_fake_ids = list(dict.fromkeys(re.findall(r"\[src_\d+\]", answer)))  # 順序保持
+        final_map = {}
+        remapped_answer = answer
+
+        for new_idx, fake_id in enumerate(used_fake_ids, 1):
+            num = str(new_idx)
+            remapped_answer = remapped_answer.replace(fake_id, f"[{num}]")
+            # 出典のインデックスから[]を取り除く（fake_id_mapは{src_1: hogehoge.pdf}のようになっている）
+            clean_id = fake_id.strip("[]")
+            # 対応する出典情報を記録
+            final_map[num] = fake_id_map.get(clean_id, "unknown")
 
         return {
-            "messages": [answer],
-            "grounding_data": grounding_data
+            "messages": [remapped_answer.strip()],
+            "grounding_data": [final_map]
         }
 
     def check_node(self, state: State) -> dict[str, Any]:
@@ -167,6 +195,34 @@ class LangGraph:
             "retry_count": state.retry_count + 1
         }
 
+    def fetch_chat_node(self, state: State) -> dict[str, Any]:
+        """チャット履歴を取得するノード"""
+        firestore = FireStore()
+        history_from_firestore = firestore.fetch_chat_log_to_input(state.user_id, state.session_id)
+        history_to_langchain = []
+        if not history_from_firestore:
+            return {"history": []}
+        else:
+            for message in history_from_firestore:
+                history_to_langchain.append(
+                    HumanMessage(content=message.get("user-message"))
+                )
+                history_to_langchain.append(
+                    AIMessage(content=message.get("agent-message"))
+                )
+            return {"history": history_to_langchain}
+
+    def insert_chat_node(self, state: State) -> None:
+        """チャット履歴をFirestoreに保存するノード"""
+        firestore = FireStore()
+        firestore.insert_current_chat(
+            user_id=state.user_id,
+            session_id=state.session_id,
+            user_message=state.query,
+            agent_message=state.messages[-1] if state.messages else ""
+        )
+
+
     def langgraph(self):
         workflow = StateGraph(State)
 
@@ -175,9 +231,12 @@ class LangGraph:
         workflow.add_node("selection", self.selection_node)
         workflow.add_node("answering", self.answering_node)
         workflow.add_node("check", self.check_node)
+        workflow.add_node("fetch_chat", self.fetch_chat_node)
+        workflow.add_node("insert_chat", self.insert_chat_node)
 
         # # フローを設定
-        workflow.set_entry_point("goal_create")
+        workflow.set_entry_point("fetch_chat")
+        workflow.add_edge("fetch_chat", "goal_create")
         workflow.add_edge("goal_create", "selection")
         workflow.add_edge("selection", "answering")
         workflow.add_edge("answering", "check")
@@ -186,8 +245,9 @@ class LangGraph:
         workflow.add_conditional_edges(
             "check",
             lambda state: state.current_judge or state.retry_count >= 3,
-            {True: END, False: "selection"}
+            {True: "insert_chat", False: "selection"}
         )
+        workflow.add_edge("insert_chat", END)
 
         checkpointer = MemorySaver()
 
@@ -195,4 +255,4 @@ class LangGraph:
         compiled = workflow.compile(checkpointer=checkpointer)
 
         return compiled
-    
+

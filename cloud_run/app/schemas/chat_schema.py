@@ -30,8 +30,14 @@ class ChatResponse(BaseModel):
 
 class State(BaseModel):
     query: str = Field(..., description="ユーザーからの質問")
-    chat_id: str = Field(
+    user_id: str = Field(
+        default="", description="ユーザーの一意の識別子"
+    )
+    session_id: str = Field(
         default="", description="会話のスレッドID"
+    )
+    history: List[dict] = Field(
+        default=[], description="過去の会話履歴"
     )
     current_role: str = Field(
         default="", description="選定された回答ロール"
