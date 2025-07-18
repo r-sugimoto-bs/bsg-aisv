@@ -1,4 +1,5 @@
 from fastapi import APIRouter
+import os
 from app.schemas.chat_schema import ChatRequest, ChatResponse, State
 from app.services.chat_langgraph import LangGraph
 from app.services.chat_gemini import Geminijob
@@ -8,10 +9,9 @@ router = APIRouter()
 @router.post("/api/v1/chat_lg")
 async def chat_bot_lg(req: ChatRequest):
     config = {"configurable": {"thread_id": "example-1"}}
-    user_query = State(query=req.message, chat_id=req.session_id)
+    user_query = State(query=req.message, user_id=req.user_id, session_id=req.session_id)
     try:
-
-        first_response = LangGraph().langgraph().invoke({"query": req.message, "chat_id": req.session_id}, config, debug=True)
+        first_response = LangGraph().langgraph().invoke(user_query, config, debug=True)
         print()
         return ChatResponse(
         message=first_response.get("messages")[-1],
@@ -24,7 +24,7 @@ async def chat_bot_lg(req: ChatRequest):
 
 @router.post("/api/v1/chat_gm")
 async def chat_bot_gm(req: ChatRequest):
-    user_query = State(query=req.message, chat_id=req.session_id)
+    user_query = State(query=req.message, session_id=req.session_id)
     try:
         response = Geminijob(user_query).flow()
         #print(response)
