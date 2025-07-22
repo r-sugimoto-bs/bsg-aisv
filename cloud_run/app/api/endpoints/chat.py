@@ -9,7 +9,7 @@ router = APIRouter()
 @router.post("/api/v1/chat_lg")
 async def chat_bot_lg(req: ChatRequest):
     config = {"configurable": {"thread_id": "example-1"}}
-    user_query = State(query=req.message, user_id=req.user_id, session_id=req.session_id)
+    user_query = State(query=req.message, user_id=req.user_id, session_id=req.session_id, source=req.source)
     try:
         first_response = LangGraph().langgraph().invoke(user_query, config, debug=True)
         print()

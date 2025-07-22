@@ -16,6 +16,10 @@ class ChatRequest(BaseModel):
         ...,
         description="ユーザーからの入力メッセージ。",
     )
+    source: Optional[str] = Field(
+        default=None,
+        description="使用する情報のソース",
+    )
 
 class ChatResponse(BaseModel):
     message: str = Field(
@@ -62,6 +66,9 @@ class State(BaseModel):
     )
     retry_count: int = Field(
         default=0, description="品質チェックのリトライ回数"
+    )
+    source: Optional[str] = Field(
+        default=None, description="情報のソース"
     )
 
 

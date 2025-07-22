@@ -33,14 +33,7 @@ class LangGraph:
                 "description": "ユーザーの要望に対して、最適な回答を提供するための全体的な監督と調整を行う役割です。",
                 "details": """LIXILの社員からの質問に対し、スーパーバイザーの目線から回答を行ってください。回答は、LIXILのデータソースのみを使用し生成してください。"""
             }
-        }   # 回答を生成するAIの役割を記載する
-        self.retriever = VertexAISearchRetriever(
-            project_id=os.environ["GOOGLE_CLOUD_PROJECT"],
-            location_id="global",
-            data_store_id=os.getenv("FC_DATASTORE"),
-            engine_data_type=0,
-            max_documents=5,
-        )
+        }
 
 
     def goal_node(self, state: State) -> dict[str, Any]:
@@ -102,16 +95,35 @@ class LangGraph:
         role = state.current_role
         role_details = "\n".join([f"- {v['name']}: {v['details']}" for v in self.ROLES.values()])
         # 事前にRetrieverで検索
-        docs = self.retriever.get_relevant_documents(state.passive_goal)
+        if state.source == "event_example":
+            retriever = VertexAISearchRetriever(
+                project_id=os.environ["GOOGLE_CLOUD_PROJECT"],
+                location_id="global",
+                data_store_id=os.getenv("EVENT_DATASTORE"),
+                engine_data_type=1,
+                max_documents=5,
+            )
+        else:
+            retriever = VertexAISearchRetriever(
+                project_id=os.environ["GOOGLE_CLOUD_PROJECT"],
+                location_id="global",
+                data_store_id=os.getenv("FC_DATASTORE"),
+                engine_data_type=0,
+                max_documents=5,
+            )
+
+
+        docs = retriever.get_relevant_documents(state.passive_goal)
 
         fake_id_map = {}
         context_parts = []
         #Geminiの回答生成で使用する出典のインデックスと引用内容の作成
+        print(docs)
         for i, doc in enumerate(docs, 1):
             fake_id = f"src_{i}"
             context_parts.append(f"[{fake_id}] {doc.page_content}")
             # 出典のインデックスと引用内容をマッピング
-            fake_id_map[fake_id] = doc.metadata["source"]
+            fake_id_map[fake_id] = doc.metadata.get("source")
 
             context = "\n\n".join(context_parts)
 
@@ -160,6 +172,10 @@ class LangGraph:
             # 対応する出典情報を記録
             final_map[num] = fake_id_map.get(clean_id, "unknown")
 
+        # return {
+        #     "messages": [answer],
+        #     "grounding_data": []
+        # }
         return {
             "messages": [remapped_answer.strip()],
             "grounding_data": [final_map]
@@ -221,6 +237,7 @@ class LangGraph:
             user_message=state.query,
             agent_message=state.messages[-1] if state.messages else ""
         )
+
 
 
     def langgraph(self):
