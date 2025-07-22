@@ -36,6 +36,21 @@ class State(BaseModel):
     session_id: str = Field(
         default="", description="会話のスレッドID"
     )
+    branch_name: Optional[str] = Field(
+        None, description="選択された支社名"
+    )
+    branch_candidates: List[str] = Field(
+        default_factory=list, description="支社あいまいマッチ候補"
+    )
+    store_name: Optional[str] = Field(
+        None, description="選択された店舗名"
+    )
+    store_candidates: List[str] = Field(
+        default_factory=list, description="店舗あいまいマッチ候補"
+    )
+    asking_slot: Optional[str] = Field(
+        default=None, description="現在ユーザーに質問中のスロット名"
+    )
     history: List[dict] = Field(
         default=[], description="過去の会話履歴"
     )
