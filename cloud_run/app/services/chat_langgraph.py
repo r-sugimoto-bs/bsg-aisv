@@ -24,6 +24,8 @@ from google.api_core.client_options import ClientOptions
 from google.cloud import discoveryengine_v1 as discoveryengine
 from app.schemas.chat_schema import PassiveGoal, Judgement, State
 from app.modules.firestore import FireStore
+from app.modules.bigquery import BigQuery
+from collections import defaultdict
 
 import json
 import requests
@@ -46,13 +48,7 @@ class LangGraph:
                 """
             }
         }   # 回答を生成するAIの役割を記載する
-        self.retriever = VertexAISearchRetriever(
-            project_id=os.environ["GOOGLE_CLOUD_PROJECT"],
-            location_id="global",
-            data_store_id=os.getenv("DATA_STORE_ID"),
-            engine_data_type=0,
-            max_documents=5,
-        )
+
         #ToDo Firestoreから店舗情報は読み取る
         self.branch_store_map = {
             "東京支社":  ["ハウステックス", "ウスクラ建設", "善光建設", "エヌティーサービス", "ライファ大塚","その他"]
@@ -60,7 +56,7 @@ class LangGraph:
         self.branch_list = list(self.branch_store_map.keys())
         self.project_id = os.environ.get('GOOGLE_CLOUD_PROJECT')
         self.location = "global"  # "us" または "eu" の場合もあり
-        self.engine_id = os.getenv("FC_DATASTORE") # Engine ID (App ID) を環境変数から取得
+        self.engine_id = os.getenv("ENGINE_ID") # Engine ID (App ID) を環境変数から取得
         # Discovery Engine クライアントの初期化
         client_options = (
             ClientOptions(api_endpoint=f"{self.location}-discoveryengine.googleapis.com")
@@ -75,6 +71,99 @@ class LangGraph:
         self.serving_config = ( f"projects/{self.project_id}/locations/{self.location}/collections/default_collection/engines/{self.engine_id}/servingConfigs/default_serving_config"
             )
 
+    def get_reference_from_citation(self, citation, references) -> list:
+        """
+        citationに基づいて、対応するreferenceを取得する関数。
+
+        Args:
+            citation (dict): citationの辞書。
+            references (list): referencesのリスト。
+
+        Returns:
+            list: 対応するreferenceの辞書リスト。見つからない場合は空リスト。
+        """
+        result = []
+        for source in citation.get("sources", []):
+            reference_id = source.get("referenceId")
+            try:
+                reference_index = int(reference_id)
+                if 0 <= reference_index < len(references):
+                    result.append(references[reference_index])
+                else:
+                    print(f"Warning: referenceId out of range: {reference_id}")
+            except (ValueError, TypeError):
+                print(f"Warning: Invalid referenceId: {reference_id}")
+        return result
+
+    def extract_datastore_name(self, document_path: str) -> str:
+        try:
+            after_datastores = document_path.split("dataStores/")[1]
+            datastore_full = after_datastores.split("/")[0]
+            datastore_name = datastore_full.split("_")[0]
+            return datastore_name
+        except Exception as e:
+            print(f"extract_datastore_name error: {e}")
+            return ""
+
+    def insert_citation_tags(self, answer_text, citations, references):
+        grounding = []
+        seen = set()
+        inserted = {}
+        offset = 0
+
+        for citation in citations:
+            #referenceIdから出典情報を取得
+            references_list = self.get_reference_from_citation(citation, references)
+            if not references_list:
+                continue
+
+            # 出典情報からタイトルを抽出
+            sources = []
+            for ref in references_list:
+                if "chunkInfo" in ref:
+                    source = ref['chunkInfo']['documentMetadata']['title']
+                elif "structuredDocumentInfo" in ref:
+                    #TODO: datastore名を抽出元となるファイル名に変更する
+                    doc_path = ref['structuredDocumentInfo']['document']
+                    source = self.extract_datastore_name(doc_path)
+                else:
+                    continue
+                if source:
+                    sources.append(source)
+                    if source not in seen:
+                        grounding.append({"title": source})
+                        seen.add(source)
+
+            if not sources:
+                continue
+            #出典位置を確認（offsetは出典を代入した際に加算される文字数）
+            end = int(citation["endIndex"]) + offset
+            #余剰な出典表示対策
+            if end > len(answer_text):
+                continue
+            #文末に出典を挿入するための位置調整
+            end = max(0, min(end, len(answer_text)))
+            insert_pos = end
+            for i in range(end, len(answer_text)):
+                if answer_text[i] in "。！？":
+                    insert_pos = i + 1
+                    break
+            #挿入位置にすでに出典が挿入されている場合は、重複を避ける
+            already_cited = inserted.setdefault(insert_pos, set())
+            new_sources = [s for s in sources if s not in already_cited]
+            unique_new_sources = []
+            #引用内での重複を除外
+            for s in new_sources:
+                if s not in unique_new_sources:
+                    unique_new_sources.append(s)
+            #新しい出典がある場合は、挿入
+            if unique_new_sources:
+                insert_text = "[" + "][".join(unique_new_sources) + "]"
+                answer_text = answer_text[:insert_pos] + insert_text + answer_text[insert_pos:]
+                offset += len(insert_text) if insert_pos == end else len(insert_text) - (end - insert_pos)
+                already_cited.update(unique_new_sources)
+        return grounding, answer_text
+    
     def fetch_node(self, state: State) -> dict:
         """【開始】会話履歴と最新Stateを読み込む"""
         firestore = FireStore()
@@ -102,6 +191,16 @@ class LangGraph:
 
     def capture_and_history_node(self, state: State) -> dict:
         """ユーザーの入力を履歴に追加し、必要ならスロットを埋める"""
+        bigquery = BigQuery()
+        # bigqueryからの店舗情報を取得
+        merchant_info_rows = bigquery.fetch_merchant_info()
+        # データ整形
+        result = defaultdict(list)
+        for row in merchant_info_rows:
+            result[row["branch_name"]].append(row["merchant_name"])
+
+        # dictに変換（必要に応じてJSON形式で出力）
+        self.merchant_info = dict(result)
         # このノードで更新される可能性がある値を準備
         updated_history = state.history + [HumanMessage(content=state.query)]
         updated_store_name = state.store_name
@@ -111,7 +210,7 @@ class LangGraph:
         if state.asking_slot == "store_name":
             updated_store_name = state.query.strip()
             updated_asking_slot = None
-            for branch, stores in self.branch_store_map.items():
+            for branch, stores in self.merchant_info.items():
                 if updated_store_name in stores:
                     updated_branch_name = branch
                     break
@@ -130,10 +229,10 @@ class LangGraph:
         """
         text = state.query.strip()
         # 全店舗のフラットリスト
-        all_stores = sum(self.branch_store_map.values(), [])
+        all_stores = sum(self.merchant_info.values(), [])
 
         # ① 直接部分一致
-        for branch, stores in self.branch_store_map.items():
+        for branch, stores in self.merchant_info.items():
             for store in stores:
                 if store in text:
                     state.store_name = store
@@ -149,7 +248,7 @@ class LangGraph:
         if fuzzy:
             store = fuzzy[0]
             state.store_name = store
-            for branch, stores in self.branch_store_map.items():
+            for branch, stores in self.merchant_info.items():
                 if store in stores:
                     state.branch_name = branch
             print(f"[DEBUG extract] fuzzy match → store_name={store!r}, branch_name={state.branch_name!r}")
@@ -174,7 +273,7 @@ class LangGraph:
 
         if extracted in all_stores:
             state.store_name = extracted
-            for branch, stores in self.branch_store_map.items():
+            for branch, stores in self.merchant_info.items():
                 if extracted in stores:
                     state.branch_name = branch
                     print(f"[EXTRACT] LLM matched branch={branch}, store={extracted}")
@@ -258,115 +357,11 @@ class LangGraph:
             "current_role": selected_role
         }
 
-
-    # def answering_node(self, state: State) -> dict[str, Any]:
-    #     # 環境変数読み込み
-    #     project_id      = os.environ["GOOGLE_CLOUD_PROJECT"]
-    #     location        = os.environ.get("LOCATION", "global")
-    #     engine_id       = os.environ["FC_DATASTORE"]  # 統合検索アプリの Engine ID
-    #     # 確定済みのデータストアIDをカンマ区切りで設定
-    #     datastore_ids   = os.environ.get("BLENDED_DATASTORES", "").split(",")
-
-    #     # クライアント初期化
-    #     client_options = (
-    #         ClientOptions(api_endpoint=f"{location}-discoveryengine.googleapis.com")
-    #         if location != "global" else None
-    #     )
-    #     client = discoveryengine.ConversationalSearchServiceClient(
-    #         client_options=client_options
-    #     )
-
-    #     # serving_config のパス（engine_id ベース）
-    #     serving_config = (
-    #         f"projects/{project_id}/locations/{location}/collections/"
-    #         f"default_collection/engines/{engine_id}/servingConfigs/"
-    #         "default_serving_config"
-    #     )
-
-    #     # クエリ準備
-    #     query = discoveryengine.Query(text=state.passive_goal or state.query)
-
-    #     # Query フェーズのオプション
-    #     query_understanding_spec = discoveryengine.AnswerQueryRequest.QueryUnderstandingSpec(
-    #         query_rephraser_spec=discoveryengine.AnswerQueryRequest.QueryUnderstandingSpec.QueryRephraserSpec(
-    #             disable=False,
-    #             max_rephrase_steps=1
-    #         )
-    #     )
-
-    #     # 統合検索時に特定のデータストアのみを検索するための設定
-    #     data_store_specs = [
-    #         discoveryengine.AnswerQueryRequest.SearchSpec.DataStoreSpec(
-    #             data_store=f"projects/{project_id}/locations/{location}/dataStores/{ds.strip()}"
-    #         )
-    #         for ds in datastore_ids if ds.strip()
-    #     ]
-
-    #     # Search フェーズのオプション（データストア指定 + 件数制限）
-    #     search_spec = discoveryengine.AnswerQueryRequest.SearchSpec(
-    #         search_params=discoveryengine.AnswerQueryRequest.SearchSpec.SearchParams(
-    #             max_return_results=3
-    #         ),
-    #         data_store_specs=data_store_specs
-    #     )
-
-    #     # Answer フェーズのオプション
-    #     answer_generation_spec = discoveryengine.AnswerQueryRequest.AnswerGenerationSpec(
-    #         ignore_adversarial_query=False,
-    #         ignore_non_answer_seeking_query=False,
-    #         ignore_low_relevant_content=False,
-    #         model_spec=discoveryengine.AnswerQueryRequest.AnswerGenerationSpec.ModelSpec(
-    #             model_version="gemini-2.0-flash-001/answer_gen/v1"
-    #         ),
-    #         prompt_spec=discoveryengine.AnswerQueryRequest.AnswerGenerationSpec.PromptSpec(
-    #             preamble=(
-    #                 "あなたはベテランのAIスーパーバイザーです。以下の役割を厳守してください。\n"
-    #                 "- 検索結果のみを情報源として、ユーザーの質問に答える\n"
-    #                 "- 若手の考えを引き出すことと、RAGで取得した抽象的な情報を具体的なアクションプランとして伝えることを意識する\n"
-    #                 "- 対話を意識し、回答が長くなりすぎないようにする\n"
-    #                 f"- 支社『{state.branch_name or '未指定'}』や店舗『{state.store_name or '未指定'}』の情報を考慮に入れる"
-    #             )
-    #         ),
-    #         include_citations=True,
-    #     )
-
-    #     # リクエスト組み立て
-    #     request = discoveryengine.AnswerQueryRequest(
-    #         serving_config=serving_config,
-    #         query=query,
-    #         session=None,
-    #         query_understanding_spec=query_understanding_spec,
-    #         search_spec=search_spec,
-    #         answer_generation_spec=answer_generation_spec,
-    #     )
-
-    #     # API 呼び出し
-    #     response = client.answer_query(request=request)
-
-    #     # レスポンス整形
-    #     resp = discoveryengine.AnswerQueryResponse.to_dict(response)
-    #     answer_text = resp.get("answer", {}).get("text", "回答が見つかりませんでした。")
-
-    #     # 引用マッピング
-    #     source_map = {
-    #         str(i+1): ref.get("chunk_info", {})
-    #                         .get("document_metadata", {})
-    #                         .get("uri", "不明なソース")
-    #         for i, ref in enumerate(resp.get("answer", {}).get("references", []))
-    #     }
-    #     used = sorted(set(re.findall(r"\[(\d+)\]", answer_text)), key=int)
-    #     grounding = { num: source_map.get(num, "不明なソース") for num in used }
-
-    #     return {
-    #         "messages": [answer_text.strip()],
-    #         "grounding_data": [grounding]
-    #     }
-
     def answering_node(self, state: State) -> dict[str, Any]:
         # 環境変数読み込み
         project_id = os.environ["GOOGLE_CLOUD_PROJECT"]
         location   = os.environ.get("LOCATION", "global")
-        engine_id  = os.environ["FC_DATASTORE"]
+        engine_id  = os.environ["ENGINE_ID"]
         query = state.query
         role = state.current_role
         role_details = "\n".join([f"- {v['name']}: {v['details']}" for v in self.ROLES.values()])
@@ -418,7 +413,13 @@ class LangGraph:
         result = response.json()
 
         # answerText 抽出と整形
-        raw_text = result.get("answer", {}).get("answerText", "回答が見つかりませんでした。")
+
+        grounding, raw_text = self.insert_citation_tags(
+            result["answer"]["answerText"],
+            result["answer"]["citations"],
+            result["answer"]["references"]
+        )
+        #raw_text = result.get("answer", {}).get("answerText", "回答が見つかりませんでした。")
         print(f'===================={raw_text}')
         summary = re.sub(r"\r", "", raw_text).strip()
 
@@ -446,6 +447,7 @@ class LangGraph:
                 - 質問者は加盟店の人間ではなく若手SVに過ぎないのであなたが連携された情報以上にその加盟店については知らないことが多いのでどんなことが課題だと思いますかなど抽象的な質問をしないでください。
                 - あなたはベテランのAIスーパーバイザーなので、若手社員に方針の質問丸投げせずにcontextから取得した抽象的な情報を自分の意見として具体的なアクションプランとして伝えることを意識してください
                 - また支社や店舗の情報をもとに地域性を考慮した情報をあなた自身が考えて回答してください。
+                - contextの内容を回答に利用する場合は、出典を明記するようにしてください。
        
             """
         if state.branch_name:
@@ -471,98 +473,10 @@ class LangGraph:
         chain = prompt | self.llm | StrOutputParser()
         answer = chain.invoke({"history": state.history, "question": query})
 
-        source_map = {}
-        for i, ref in enumerate(result.get("answer", {}).get("references", []), start=1):
-            if "chunkInfo" in ref:
-                uri = ref["chunkInfo"]["documentMetadata"].get("uri", "")
-            else:
-                uri = ref.get("structuredDocumentInfo", {}).get("document", "")
-            source_map[str(i)] = uri
-        used = sorted(set(re.findall(r"\[(\d+)\]", answer)), key=int)
-        grounding = {num: source_map.get(num, "") for num in used}
-
         return {
             "messages": [answer.strip()],
-            "grounding_data": [grounding]
+            "grounding_data": grounding
         }
-        
-    # def answering_node(self, state: State) -> dict[str, Any]:
-    #     query = state.query
-    #     role = state.current_role
-    #     role_details = "\n".join([f"- {v['name']}: {v['details']}" for v in self.ROLES.values()])
-    #     # 事前にRetrieverで検索
-    #     docs = self.retriever.get_relevant_documents(state.passive_goal)
-
-    #     fake_id_map = {}
-    #     context_parts = []
-    #     #Geminiの回答生成で使用する出典のインデックスと引用内容の作成
-    #     for i, doc in enumerate(docs, 1):
-    #         fake_id = f"src_{i}"
-    #         context_parts.append(f"[{fake_id}] {doc.page_content}")
-    #         # 出典のインデックスと引用内容をマッピング
-    #         fake_id_map[fake_id] = doc.metadata["source"]
-
-    #         context = "\n\n".join(context_parts)
-    #     system_prompt = """
-    #     あなたは{role}として回答してください。あなたの役割に基づいてユーザーのニーズを満たす回答を提供してください。
-    #     提供されたcontextのみを使用して、この質問に答えてください。
-    #     回答には、使った情報の出典を [src_n] の形式で必ず明記してください（例: [src_1], [src_2]）。
-    #     [src_num1, src_num2] のような記載は避けてください。（例：[src_3, src_4]ではなく[src_3][src_4]としてください)
-    #     出典の一覧は書かないでください。
-    #     役割の詳細に従って回答を生成してください。
-    #     役割の詳細:
-    #     {role_details}
-    #     ユーザーが求めているニーズは以下の通りです。
-    #     {needs}
-    #     context:
-    #     {context}
-        
-    #     日本語で回答してください。
-    #     対話を意識して回答文が長くなりすぎないようにしてください。
-    #     あなたはベテランのAIスーパーバイザーなので、若手の考えを引き出しつつも質問丸投げせずに
-    #     データソースから取得した抽象的な情報を自分の意見として具体的なアクションプランとして伝えることを意識してください
-    #     また支社や店舗の情報をもとに地域に特化した情報を含めて考えてください。
-    #     """
-        
-        # if state.branch_name:
-        #     system_prompt += f"・支社: {state.branch_name}\n"
-        # if state.store_name:
-        #     system_prompt += f"・店舗: {state.store_name}\n"
-        
-        # system_prompt = system_prompt.format(
-        #     role=role,
-        #     role_details=role_details,  # 修正: role_detailsをformatに追加
-        #     needs=state.passive_goal if state.passive_goal else "",
-        #     context=context if context else ""
-        # )
-        # prompt = ChatPromptTemplate.from_messages(
-        #     [
-        #         SystemMessage(
-        #             content=system_prompt.strip()),
-        #         MessagesPlaceholder("history"),
-        #         HumanMessagePromptTemplate.from_template("{question}"),
-        #     ]
-        # )
-
-        # chain = prompt | self.llm | StrOutputParser()
-        # answer = chain.invoke({"history": state.history, "question": query})
-    #     # 出典情報を[n]のような形で表示する
-        # used_fake_ids = list(dict.fromkeys(re.findall(r"\[src_\d+\]", answer)))  # 順序保持
-        # final_map = {}
-        # remapped_answer = answer
-
-        # for new_idx, fake_id in enumerate(used_fake_ids, 1):
-        #     num = str(new_idx)
-        #     remapped_answer = remapped_answer.replace(fake_id, f"[{num}]")
-        #     # 出典のインデックスから[]を取り除く（fake_id_mapは{src_1: hogehoge.pdf}のようになっている）
-        #     clean_id = fake_id.strip("[]")
-        #     # 対応する出典情報を記録
-        #     final_map[num] = fake_id_map.get(clean_id, "unknown")
-
-        # return {
-        #     "messages": [remapped_answer.strip()],
-        #     "grounding_data": [final_map]
-        # }
 
     def check_node(self, state: State) -> dict[str, Any]:
         query = state.query
